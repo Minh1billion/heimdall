@@ -1,0 +1,17 @@
+{
+  "name": "heimdall",
+  "productName": "Heimdall",
+  "version": "0.1.0",
+  "description": "Connect Facebook ad accounts, analyze performance with an LLM agent, and deliver statistics where your team works.",
+  "private": true,
+  "author": "Heimdall",
+  "scripts": {
+    "postinstall": "cd client && npm install",
+    "dev": "tauri dev",
+    "build": "tauri build",
+    "tauri": "tauri"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.0.0"
+  }
+}

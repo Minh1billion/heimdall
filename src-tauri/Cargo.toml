@@ -1,0 +1,36 @@
+[package]
+name = "heimdall"
+version = "0.1.0"
+description = "Connect Facebook ad accounts, analyze performance with an LLM agent, and deliver statistics where your team works."
+authors = ["Heimdall"]
+edition = "2021"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon", "image-png"] }
+tauri-plugin-single-instance = "2"
+tauri-plugin-opener = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
+fernet = { version = "0.2", default-features = false, features = ["rustcrypto"] }
+chrono = "0.4"
+chrono-tz = "0.10"
+tokio = { version = "1", features = ["sync", "time", "rt", "macros"] }
+percent-encoding = "2"
+url = "2"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+async-trait = "0.1"
+rand = "0.8"
+futures = "0.3"
+uuid = { version = "1", features = ["v4"] }
+lettre = { version = "0.11", default-features = false, features = ["smtp-transport", "builder", "rustls-tls"] }
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "s"
+panic = "abort"
+strip = true
