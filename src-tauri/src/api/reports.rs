@@ -3,12 +3,15 @@ use crate::container::{Container, CHANNEL_LABELS};
 use crate::models::{iso_or_null, AlertRuleRow, ReportScheduleRow};
 use crate::router::{HttpError, Router};
 use crate::services::alerts::{preview_alert, AlertDraft};
-use crate::services::reports::build_report;
+use crate::services::destinations::{broadcast_reports, get_destination, linked_ids, outcome_out, Overrides};
+use crate::services::reports::{build_report, build_report_with};
+use crate::services::templates;
 use crate::services::render::render_all;
 use crate::tools::common::METRICS;
 use crate::validation::{parse, Field, Kind};
-use rusqlite::{params, OptionalExtension};
+use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::{json, Map, Value};
+use std::collections::HashMap;
 
 const CHANNELS: [&str; 4] = ["telegram", "slack", "zalo", "email"];
 const TEMPLATES: [&str; 2] = ["daily", "weekly"];
@@ -22,6 +25,32 @@ fn account_field() -> Field {
     Field::text("account_id").nullish()
 }
 
+fn template_id_field() -> Field {
+    Field::new("template_id", Kind::Int { min: Some(1), max: None }).nullish()
+}
+
+fn read_text_list(body: &Value, key: &str) -> Result<Option<Vec<String>>, HttpError> {
+    match body.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::Array(items)) => {
+            let mut out: Vec<String> = Vec::new();
+            for item in items {
+                match item.as_str() {
+                    Some(text) if !text.trim().is_empty() => {
+                        let clean = text.trim().to_string();
+                        if !out.contains(&clean) {
+                            out.push(clean);
+                        }
+                    }
+                    _ => return Err(HttpError::new(422, format!("{}: Expected strings", key))),
+                }
+            }
+            Ok(Some(out))
+        }
+        Some(_) => Err(HttpError::new(422, format!("{}: Expected array", key))),
+    }
+}
+
 fn enabled_fields() -> Vec<Field> {
     vec![Field::new("enabled", Kind::Bool)]
 }
@@ -31,7 +60,8 @@ fn schedule_fields() -> Vec<Field> {
         template_field(),
         account_field(),
         Field::new("name", Kind::Str { min: Some(1), max: Some(120) }),
-        Field::new("channel", Kind::Enum(&CHANNELS)),
+        Field::new("channel", Kind::Enum(&CHANNELS)).nullish(),
+        Field::new("destination_id", Kind::Int { min: Some(1), max: None }).nullish(),
         Field::new("time", Kind::Time),
         Field::new("weekday", Kind::Int { min: Some(0), max: Some(6) }).nullish(),
     ]
@@ -113,13 +143,27 @@ pub async fn deliver(container: &Container, name: &str, subject: &str, text: &st
     }
 }
 
-fn schedule_out(row: &ReportScheduleRow) -> Value {
+fn link_map(conn: &Connection) -> rusqlite::Result<HashMap<i64, Vec<i64>>> {
+    let mut statement =
+        conn.prepare("SELECT schedule_id, destination_id FROM schedule_destinations ORDER BY destination_id")?;
+    let pairs = statement
+        .query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)))?
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut map: HashMap<i64, Vec<i64>> = HashMap::new();
+    for (schedule, destination) in pairs {
+        map.entry(schedule).or_default().push(destination);
+    }
+    Ok(map)
+}
+
+fn schedule_out(row: &ReportScheduleRow, destination_ids: Vec<i64>) -> Value {
     json!({
         "id": row.id,
         "name": row.name,
         "template": row.template,
         "account_id": row.account_id,
         "channel": row.channel,
+        "destination_ids": destination_ids,
         "time": row.time,
         "weekday": row.weekday,
         "enabled": row.enabled != 0,
@@ -160,6 +204,32 @@ fn find_rule(container: &Container, id: i64) -> Result<Option<AlertRuleRow>, Htt
         .optional()?)
 }
 
+fn read_ids(body: &Value, key: &str, extra: Option<i64>) -> Result<Vec<i64>, HttpError> {
+    let mut ids: Vec<i64> = Vec::new();
+    match body.get(key) {
+        None | Some(Value::Null) => {}
+        Some(Value::Array(items)) => {
+            for item in items {
+                match item.as_i64() {
+                    Some(found) if found >= 1 => {
+                        if !ids.contains(&found) {
+                            ids.push(found);
+                        }
+                    }
+                    _ => return Err(HttpError::new(422, format!("{}: Expected positive integers", key))),
+                }
+            }
+        }
+        Some(_) => return Err(HttpError::new(422, format!("{}: Expected array", key))),
+    }
+    if let Some(found) = extra {
+        if !ids.contains(&found) {
+            ids.push(found);
+        }
+    }
+    Ok(ids)
+}
+
 fn int_id(raw: &str) -> Result<i64, HttpError> {
     let digits = raw.strip_prefix('-').unwrap_or(raw);
     if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
@@ -193,12 +263,20 @@ pub fn register(router: &mut Router) {
     });
 
     router.post("/reports/preview", |context| async move {
-        let input = parse(&[template_field(), account_field()], &context.body)?;
+        let input = parse(&[template_field(), account_field(), template_id_field()], &context.body)?;
         let account = text_of(&input, "account_id");
         require_account(&context.container, account)?;
         let template = text_of(&input, "template").unwrap_or("daily");
         let account = account.filter(|value| !value.is_empty());
-        let report = build_report(&context.container, template, account, false).await?;
+        let config = match input.get("template_id").and_then(Value::as_i64) {
+            Some(id) => {
+                templates::find(&context.container.db, id)?
+                    .ok_or_else(|| HttpError::new(404, "Template not found"))?
+                    .config
+            }
+            None => templates::TemplateConfig::default(),
+        };
+        let report = build_report_with(&context.container, template, account, &config, false).await?;
         Ok::<Value, HttpError>(json!({
             "title": report.title,
             "text": report.text,
@@ -230,19 +308,72 @@ pub fn register(router: &mut Router) {
 
     router.add("POST", "/reports/send", 204, |context| async move {
         let mut fields = vec![template_field(), account_field()];
-        fields.push(Field::new("channel", Kind::Enum(&CHANNELS)));
+        fields.push(Field::new("channel", Kind::Enum(&CHANNELS)).nullish());
+        fields.push(Field::new("destination_id", Kind::Int { min: Some(1), max: None }).nullish());
         let input = parse(&fields, &context.body)?;
         let account = text_of(&input, "account_id");
         require_account(&context.container, account)?;
+        let template = text_of(&input, "template").unwrap_or("daily");
+        let account = account.filter(|value| !value.is_empty());
+        if let Some(id) = input.get("destination_id").and_then(Value::as_i64) {
+            let stored = get_destination(&context.container.db, &context.container.store, id)?;
+            if stored.row.enabled == 0 {
+                return Err(HttpError::new(409, format!("{} is paused", stored.row.name)));
+            }
+            let outcomes =
+                broadcast_reports(&context.container, &[id], template, account, &Overrides::default()).await;
+            if let Some(error) = outcomes.first().and_then(|item| item.error.clone()) {
+                return Err(HttpError::new(502, error));
+            }
+            return Ok(Value::Null);
+        }
         let channel = text_of(&input, "channel").unwrap_or("").to_string();
+        if channel.is_empty() {
+            return Err(HttpError::new(422, "destination_id: Required"));
+        }
         if context.container.notifier(&channel).is_none() {
             return Err(HttpError::new(503, format!("{} is not configured", label_of(&channel))));
         }
-        let template = text_of(&input, "template").unwrap_or("daily");
-        let account = account.filter(|value| !value.is_empty());
         let report = build_report(&context.container, template, account, true).await?;
         deliver(&context.container, &channel, &report.title, &report.text).await?;
         Ok(Value::Null)
+    });
+
+    router.post("/reports/broadcast", |context| async move {
+        let input = parse(&[template_field(), account_field(), template_id_field()], &context.body)?;
+        let account = text_of(&input, "account_id");
+        require_account(&context.container, account)?;
+        let ids = read_ids(&context.body, "destination_ids", None)?;
+        if ids.is_empty() {
+            return Err(HttpError::new(422, "destination_ids: Pick at least one destination"));
+        }
+        let account_ids = read_text_list(&context.body, "account_ids")?;
+        if let Some(list) = &account_ids {
+            for found in list {
+                require_account(&context.container, Some(found.as_str()))?;
+            }
+        }
+        let template_id = input.get("template_id").and_then(Value::as_i64);
+        if let Some(id) = template_id {
+            if templates::find(&context.container.db, id)?.is_none() {
+                return Err(HttpError::new(404, "Template not found"));
+            }
+        }
+        let template = text_of(&input, "template").unwrap_or("daily");
+        let account = account.filter(|value| !value.is_empty());
+        let overrides = Overrides {
+            account_ids,
+            template_id,
+            ..Overrides::default()
+        };
+        let outcomes = broadcast_reports(&context.container, &ids, template, account, &overrides).await;
+        let sent = outcomes.iter().filter(|item| item.error.is_none()).count();
+        let rows: Vec<Value> = outcomes.iter().map(outcome_out).collect();
+        Ok::<Value, HttpError>(json!({
+            "results": rows,
+            "sent": sent,
+            "failed": outcomes.len() - sent,
+        }))
     });
 
     router.get("/reports/schedules", |context| async move {
@@ -251,7 +382,12 @@ pub fn register(router: &mut Router) {
         let rows = statement
             .query_map([], ReportScheduleRow::from_row)?
             .collect::<Result<Vec<_>, _>>()?;
-        Ok::<Value, HttpError>(Value::Array(rows.iter().map(schedule_out).collect()))
+        let links = link_map(&conn)?;
+        Ok::<Value, HttpError>(Value::Array(
+            rows.iter()
+                .map(|row| schedule_out(row, links.get(&row.id).cloned().unwrap_or_default()))
+                .collect(),
+        ))
     });
 
     router.post("/reports/schedules", |context| async move {
@@ -263,6 +399,21 @@ pub fn register(router: &mut Router) {
         if template == "weekly" && weekday.is_none() {
             weekday = Some(0);
         }
+        let single = input.get("destination_id").and_then(Value::as_i64);
+        let destination_ids = read_ids(&context.body, "destination_ids", single)?;
+        let mut channel = text_of(&input, "channel").unwrap_or("").to_string();
+        if let Some(first) = destination_ids.first() {
+            let mut first_channel: Option<String> = None;
+            for found in &destination_ids {
+                let stored = get_destination(&context.container.db, &context.container.store, *found)?;
+                if first_channel.is_none() {
+                    first_channel = Some(stored.row.channel.clone());
+                }
+            }
+            channel = first_channel.unwrap_or_else(|| format!("destination-{}", first));
+        } else if channel.is_empty() {
+            return Err(HttpError::new(422, "destination_ids: Pick at least one destination"));
+        }
         let id = {
             let conn = context.container.db.lock();
             conn.execute(
@@ -271,15 +422,22 @@ pub fn register(router: &mut Router) {
                     text_of(&input, "name").unwrap_or(""),
                     template,
                     account,
-                    text_of(&input, "channel").unwrap_or(""),
+                    channel,
                     text_of(&input, "time").unwrap_or(""),
                     weekday
                 ],
             )?;
-            conn.last_insert_rowid()
+            let created = conn.last_insert_rowid();
+            for found in &destination_ids {
+                conn.execute(
+                    "INSERT INTO schedule_destinations (schedule_id, destination_id) VALUES (?1, ?2)",
+                    params![created, found],
+                )?;
+            }
+            created
         };
         match find_schedule(&context.container, id)? {
-            Some(row) => Ok(schedule_out(&row)),
+            Some(row) => Ok(schedule_out(&row, linked_ids(&context.container.db, id)?)),
             None => Err(HttpError::new(404, "Schedule not found")),
         }
     });
@@ -299,7 +457,7 @@ pub fn register(router: &mut Router) {
             )?;
         }
         match find_schedule(&context.container, id)? {
-            Some(row) => Ok(schedule_out(&row)),
+            Some(row) => Ok(schedule_out(&row, linked_ids(&context.container.db, id)?)),
             None => Err(HttpError::new(404, "Schedule not found")),
         }
     });

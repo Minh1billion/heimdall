@@ -243,10 +243,100 @@ export interface AlertPreview {
   email: EmailContext;
 }
 
+export interface Destination {
+  id: number;
+  name: string;
+  channel: string;
+  enabled: boolean;
+  summary: string;
+  recipients: string[];
+  values: Record<string, string>;
+  secrets: Record<string, string>;
+  created_at: string | null;
+  last_sent_at: string | null;
+  last_error: string | null;
+  template_id: number | null;
+  account_ids: string[];
+}
+
+export interface Destinations {
+  destinations: Destination[];
+}
+
+export interface DestinationTest extends Destinations {
+  message: string;
+}
+
+export interface DestinationInput {
+  name: string;
+  channel: string;
+  config: Record<string, string>;
+  template_id?: number | null;
+  account_ids?: string[];
+}
+
+export interface DestinationPatch {
+  name?: string;
+  config?: Record<string, string>;
+  enabled?: boolean;
+  template_id?: number | null;
+  account_ids?: string[];
+}
+
+export type SendTarget = { channel: string } | { destination_id: number };
+
+export interface BroadcastPart {
+  label: string;
+  ok: boolean;
+  error: string | null;
+}
+
+export interface BroadcastItem {
+  parts?: BroadcastPart[];
+  destination_id: number;
+  name: string;
+  channel: string;
+  ok: boolean;
+  skipped: boolean;
+  error: string | null;
+}
+
+export interface BroadcastResult {
+  results: BroadcastItem[];
+  sent: number;
+  failed: number;
+}
+
 export interface ReportParams {
   template: "daily" | "weekly";
   account_id: string | null;
+  template_id?: number | null;
 }
+
+export interface BroadcastOptions {
+  account_ids?: string[] | null;
+  template_id?: number | null;
+}
+
+export interface ReportTemplate {
+  id: number;
+  name: string;
+  metrics: string[];
+  campaigns: number;
+  anomalies: boolean;
+  insight: boolean;
+  language: "en" | "vi";
+  header: string;
+  footer: string;
+  used_by: number;
+}
+
+export interface Templates {
+  templates: ReportTemplate[];
+  metrics: string[];
+}
+
+export type TemplateInput = Omit<ReportTemplate, "id" | "used_by">;
 
 export interface Schedule {
   id: number;
@@ -254,6 +344,7 @@ export interface Schedule {
   template: string;
   account_id: string | null;
   channel: string;
+  destination_ids: number[];
   time: string;
   weekday: number | null;
   enabled: boolean;
@@ -263,7 +354,8 @@ export interface Schedule {
 
 export interface ScheduleInput extends ReportParams {
   name: string;
-  channel: string;
+  channel: string | null;
+  destination_ids: number[];
   time: string;
   weekday: number | null;
 }
@@ -413,8 +505,26 @@ export const api = {
   testChannel: (name: string) => request<void>(`/channels/${name}/test`, { method: "POST" }),
   previewReport: (params: ReportParams) =>
     request<Report>("/reports/preview", { method: "POST", body: JSON.stringify(params) }),
-  sendReport: (params: ReportParams, channel: string) =>
-    request<void>("/reports/send", { method: "POST", body: JSON.stringify({ ...params, channel }) }),
+  sendReport: (params: ReportParams, target: SendTarget) =>
+    request<void>("/reports/send", { method: "POST", body: JSON.stringify({ ...params, ...target }) }),
+  broadcastReport: (params: ReportParams, destinationIds: number[], options?: BroadcastOptions) =>
+    request<BroadcastResult>("/reports/broadcast", {
+      method: "POST",
+      body: JSON.stringify({ ...params, ...options, destination_ids: destinationIds }),
+    }),
+  templates: () => request<Templates>("/templates"),
+  createTemplate: (input: TemplateInput) =>
+    request<Templates>("/templates", { method: "POST", body: JSON.stringify(input) }),
+  updateTemplate: (id: number, input: TemplateInput) =>
+    request<Templates>(`/templates/${id}`, { method: "PUT", body: JSON.stringify(input) }),
+  deleteTemplate: (id: number) => request<Templates>(`/templates/${id}`, { method: "DELETE" }),
+  destinations: () => request<Destinations>("/destinations"),
+  createDestination: (input: DestinationInput) =>
+    request<Destinations>("/destinations", { method: "POST", body: JSON.stringify(input) }),
+  updateDestination: (id: number, patch: DestinationPatch) =>
+    request<Destinations>(`/destinations/${id}`, { method: "PUT", body: JSON.stringify(patch) }),
+  deleteDestination: (id: number) => request<Destinations>(`/destinations/${id}`, { method: "DELETE" }),
+  testDestination: (id: number) => request<DestinationTest>(`/destinations/${id}/test`, { method: "POST" }),
   schedules: () => request<Schedule[]>("/reports/schedules"),
   createSchedule: (input: ScheduleInput) =>
     request<Schedule>("/reports/schedules", { method: "POST", body: JSON.stringify(input) }),

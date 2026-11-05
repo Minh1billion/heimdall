@@ -12,22 +12,27 @@ import {
   Plus,
   Repeat,
   Send,
+  SlidersHorizontal,
   Trash2,
   TriangleAlert,
+  Users,
 } from "lucide-react";
 import { type FormEvent, useEffect, useState } from "react";
-import { api, type Report, type Schedule } from "../api";
+import { Link } from "react-router-dom";
+import { api, type BroadcastItem, type Destination, type EmailContext, type Report, type Schedule } from "../api";
+import { AccountPicker } from "../components/AccountPicker";
 import { AccountSelect } from "../components/AccountSelect";
 import { ChannelPreview } from "../components/ChannelPreview";
-import { ChannelSelect } from "../components/ChannelSelect";
 import { EmptyState } from "../components/EmptyState";
 import { Field } from "../components/Field";
 import { BrandIcon, IconTile } from "../components/IconTile";
 import { PageHeader } from "../components/PageHeader";
+import { Result } from "../components/Result";
 import { Segmented } from "../components/Segmented";
 import { SectionHead } from "../components/SectionHead";
 import { Select } from "../components/Select";
 import { Switch } from "../components/Switch";
+import { TargetPicker, type Target } from "../components/TargetPicker";
 import { Tooltip } from "../components/Tooltip";
 import { When } from "../components/When";
 import { titleCase } from "../statusMeta";
@@ -42,6 +47,8 @@ const TEMPLATES = {
 
 type Template = keyof typeof TEMPLATES;
 
+type ScopeMode = "own" | "custom";
+
 function when(item: Schedule): string {
   return item.weekday !== null ? `Every ${WEEKDAYS[item.weekday] ?? "week"} at ${item.time}` : `Every day at ${item.time}`;
 }
@@ -49,12 +56,18 @@ function when(item: Schedule): string {
 export function Reports() {
   const accounts = useAsync(() => api.adsAccounts(), []);
   const channels = useAsync(() => api.channels(), []);
+  const destinations = useAsync(() => api.destinations(), []);
+  const templates = useAsync(() => api.templates(), []);
   const [version, setVersion] = useState(0);
   const schedules = useAsync(() => api.schedules(), [version]);
 
   const [template, setTemplate] = useState<Template>("daily");
   const [accountId, setAccountId] = useState<string | null>(null);
-  const [channel, setChannel] = useState("telegram");
+  const [scopeMode, setScopeMode] = useState<ScopeMode>("own");
+  const [customAccounts, setCustomAccounts] = useState<string[]>([]);
+  const [customTemplate, setCustomTemplate] = useState(0);
+  const [selected, setSelected] = useState<string[]>([]);
+  const [results, setResults] = useState<BroadcastItem[] | null>(null);
   const [report, setReport] = useState<Report | null>(null);
   const [sending, setSending] = useState(false);
   const [previewing, setPreviewing] = useState(false);
@@ -66,10 +79,39 @@ export function Reports() {
   const [weekday, setWeekday] = useState(0);
   const [adding, setAdding] = useState(false);
 
-  const params = { template, account_id: accountId };
+  const customMode = scopeMode === "custom";
+  const params = {
+    template,
+    account_id: customMode ? (customAccounts.length === 1 ? customAccounts[0] : null) : accountId,
+  };
+  const templateList = templates.data?.templates ?? [];
   const channelList = channels.data ?? [];
   const accountList = accounts.data?.accounts ?? [];
-  const selectedChannel = channelList.find((entry) => entry.name === channel);
+  const destinationList = destinations.data?.destinations ?? [];
+  const targets: Target[] = [
+    ...destinationList
+      .filter((entry) => entry.enabled)
+      .map((entry) => ({ value: `d:${entry.id}`, label: entry.name, channel: entry.channel, hint: entry.summary })),
+    ...channelList
+      .filter((entry) => entry.configured)
+      .map((entry) => ({ value: `c:${entry.name}`, label: `${entry.label} (default)`, channel: entry.name, hint: "From Settings" })),
+  ];
+  const chosen = targets.filter((entry) => selected.includes(entry.value));
+  const focus = chosen[0] ?? targets[0] ?? null;
+  const previewChannel = focus?.channel ?? "telegram";
+  const focusDestination = focus?.value.startsWith("d:")
+    ? destinationList.find((entry) => entry.id === Number(focus.value.slice(2)))
+    : undefined;
+  const previewAccount = customMode ? (customAccounts[0] ?? null) : (focusDestination?.account_ids[0] ?? accountId);
+  const previewTemplateId = customMode
+    ? customTemplate || (focusDestination?.template_id ?? null)
+    : (focusDestination?.template_id ?? null);
+  const previewEmail: EmailContext | null =
+    report?.email && focusDestination?.channel === "email"
+      ? { from: report.email.from, to: focusDestination.recipients }
+      : (report?.email ?? null);
+  const isDestination = (entry: Target) => entry.value.startsWith("d:");
+  const reason = (failure: unknown) => (failure instanceof Error ? failure.message : "Request failed");
   const accountName = (id: string | null) => (id ? (accountList.find((entry) => entry.id === id)?.name ?? id) : "All accounts");
   const channelName = (id: string) => channelList.find((entry) => entry.name === id)?.label ?? id;
   const fail = (failure: unknown) =>
@@ -79,7 +121,7 @@ export function Reports() {
     let active = true;
     setPreviewing(true);
     api
-      .previewReport({ template, account_id: accountId })
+      .previewReport({ template, account_id: previewAccount, template_id: previewTemplateId })
       .then((result) => {
         if (active) setReport(result);
       })
@@ -92,30 +134,65 @@ export function Reports() {
     return () => {
       active = false;
     };
-  }, [template, accountId]);
+  }, [template, previewAccount, previewTemplateId]);
 
   const send = async () => {
+    if (chosen.length === 0) return;
     setSending(true);
     setMessage(null);
+    setResults(null);
+    const outcomes: BroadcastItem[] = [];
+    const destinationTargets = chosen.filter(isDestination);
     try {
-      await api.sendReport(params, channel);
-      setMessage({ kind: "ok", text: `Report sent to ${channelName(channel)}.` });
+      if (destinationTargets.length > 0) {
+        const sent = await api.broadcastReport(
+          params,
+          destinationTargets.map((entry) => Number(entry.value.slice(2))),
+          customMode ? { account_ids: customAccounts, template_id: customTemplate || null } : undefined,
+        );
+        outcomes.push(...sent.results);
+      }
     } catch (failure) {
-      fail(failure);
-    } finally {
-      setSending(false);
+      for (const entry of destinationTargets) {
+        outcomes.push({
+          destination_id: Number(entry.value.slice(2)),
+          name: entry.label,
+          channel: entry.channel,
+          ok: false,
+          skipped: false,
+          error: reason(failure),
+        });
+      }
     }
+    for (const entry of chosen.filter((item) => !isDestination(item))) {
+      try {
+        await api.sendReport(params, { channel: entry.value.slice(2) });
+        outcomes.push({ destination_id: 0, name: entry.label, channel: entry.channel, ok: true, skipped: false, error: null });
+      } catch (failure) {
+        outcomes.push({ destination_id: 0, name: entry.label, channel: entry.channel, ok: false, skipped: false, error: reason(failure) });
+      }
+    }
+    setResults(outcomes);
+    setSending(false);
   };
 
   const create = async (event: FormEvent) => {
     event.preventDefault();
+    if (chosen.length === 0) return;
+    const defaults = chosen.filter((entry) => !isDestination(entry));
+    const linked = chosen.filter(isDestination);
+    if (defaults.length > 0 && (linked.length > 0 || defaults.length > 1)) {
+      setMessage({ kind: "error", text: "A schedule can send to several destinations, or to one default channel, not both." });
+      return;
+    }
     setMessage(null);
     setAdding(true);
     try {
       await api.createSchedule({
         ...params,
         name: name.trim() || `${template} report`,
-        channel,
+        channel: defaults[0]?.channel ?? null,
+        destination_ids: linked.map((entry) => Number(entry.value.slice(2))),
         time,
         weekday: template === "weekly" ? weekday : null,
       });
@@ -153,18 +230,19 @@ export function Reports() {
   const active = list.filter((item) => item.enabled).length;
 
   return (
-    <div className="page">
+    <div className="page fit">
       <PageHeader to="/reports" />
+      {message && <p className={message.kind === "ok" ? "notice fit-notice" : "notice error fit-notice"}>{message.text}</p>}
 
-      <div className="split trio">
-        <aside className="split-side">
-          <SectionHead icon={FilePlus2} title="Build a report" text="Pick what to cover and send it to a channel. The preview updates as you choose." />
-          <div className="card panel">
-            <div className="fields">
-              <div className="span-all">
-                <Field label="Template" hint="Daily covers yesterday. Weekly covers the last 7 days.">
+      <div className="fit-grid">
+        <section className="fit-col">
+          <SectionHead icon={FilePlus2} title="Build a report" />
+          <div className="card panel compact fit-scroll">
+            <div className="fields one">
+              <div>
+                <Field label="Period" hint="Daily covers yesterday. Weekly covers the last 7 days.">
                   <Segmented
-                    ariaLabel="Template"
+                    ariaLabel="Period"
                     value={template}
                     onChange={setTemplate}
                     options={(Object.keys(TEMPLATES) as Template[]).map((key) => ({
@@ -176,38 +254,132 @@ export function Reports() {
                   />
                 </Field>
               </div>
-              <div className="span-all">
-                <Field label="Ad account" hint="Report on one account, or the total of all of them.">
-                  <AccountSelect accounts={accountList} value={accountId} onChange={setAccountId} />
+              <div>
+                <Field
+                  label="Scope"
+                  hint="Per destination: each one gets its own ad accounts and template, set on the Destinations page. Custom: choose the accounts and template for this send only."
+                >
+                  <Segmented
+                    ariaLabel="Scope"
+                    value={scopeMode}
+                    onChange={setScopeMode}
+                    options={[
+                      { value: "own", label: "Per destination", icon: Users, tip: "Each destination uses its own settings." },
+                      { value: "custom", label: "Custom", icon: SlidersHorizontal, tip: "Choose accounts and template for this send." },
+                    ]}
+                  />
                 </Field>
               </div>
-              <div className="span-all">
-                <Field label="Channel" hint="Where the report is delivered when you send it.">
-                  <ChannelSelect channels={channelList} value={channel} onChange={setChannel} />
+              {customMode ? (
+                <>
+                  <div>
+                    <Field
+                      label="Ad accounts"
+                      hint="Tick several accounts to send one message per account. Tick none to send the total of all accounts."
+                    >
+                      <AccountPicker accounts={accountList} selected={customAccounts} onChange={setCustomAccounts} />
+                    </Field>
+                  </div>
+                  <div>
+                    <Field label="Template" hint="Leave on each destination's own to keep what you set on the Destinations page.">
+                      <Select
+                        ariaLabel="Template"
+                        value={customTemplate}
+                        onChange={setCustomTemplate}
+                        options={[
+                          { value: 0, label: "Each destination's own" },
+                          ...templateList.map((entry) => ({ value: entry.id, label: entry.name })),
+                        ]}
+                      />
+                    </Field>
+                  </div>
+                </>
+              ) : (
+                <div>
+                  <Field
+                    label="Fallback ad account"
+                    hint="Used only for destinations and default channels that have no ad accounts of their own."
+                  >
+                    <AccountSelect accounts={accountList} value={accountId} onChange={setAccountId} />
+                  </Field>
+                </div>
+              )}
+              <div>
+                <Field label="Send to" hint="Tick one or more destinations. Manage them on the Destinations page.">
+                  {targets.length > 0 ? (
+                    <TargetPicker targets={targets} selected={selected} onChange={setSelected} />
+                  ) : (
+                    <p className="inline-warn">
+                      <TriangleAlert size={15} />
+                      <span>
+                        No destination yet. <Link to="/destinations">Add one</Link> first.
+                      </span>
+                    </p>
+                  )}
                 </Field>
               </div>
             </div>
-            {selectedChannel && !selectedChannel.configured && (
-              <p className="inline-warn">
-                <TriangleAlert size={15} />
-                {selectedChannel.label} is not configured yet, so sending will fail.
-              </p>
-            )}
             <div className="panel-actions">
-              <button type="button" className="btn primary grow" disabled={sending} onClick={send}>
-                {sending ? <LoaderCircle size={16} className="spin" /> : <Send size={16} />} Send now
+              <button type="button" className="btn primary grow" disabled={sending || chosen.length === 0} onClick={send}>
+                {sending ? <LoaderCircle size={16} className="spin" /> : <Send size={16} />}{" "}
+                {chosen.length > 1 ? `Send to ${chosen.length} destinations` : "Send now"}
               </button>
             </div>
+            {results && (
+              <ul className="send-results">
+                {results.map((item, index) => (
+                  <li key={`${item.destination_id}-${index}`}>
+                    <Result
+                      outcome={
+                        item.ok
+                          ? { status: "ok", message: `${item.name}: sent`, model: "", latency: 0 }
+                          : { status: "error", message: `${item.name}: ${item.error ?? "failed"}` }
+                      }
+                    />
+                    {item.parts && item.parts.length > 1 && (
+                      <ul className="part-list">
+                        {item.parts.map((part, position) => (
+                          <li key={position} className={part.ok ? undefined : "bad"}>
+                            {part.ok ? "✓" : "✗"} {part.label}
+                            {part.error ? `: ${part.error}` : ""}
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                  </li>
+                ))}
+              </ul>
+            )}
           </div>
+        </section>
 
-          <div className="gap" />
-          <SectionHead
-            icon={CalendarClock}
-            title="Schedule it"
-            text="Uses the template, account and channel above. Times follow the server timezone."
-          />
-          <form className="card panel" onSubmit={create}>
-            <div className="fields">
+        <section className="fit-col">
+          <SectionHead icon={FileText} title="Preview" />
+          <div className="fit-scroll grow">
+            <ChannelPreview
+              channel={previewChannel}
+              rendered={report?.rendered ?? null}
+              email={previewEmail}
+              loading={previewing}
+              emptyText="The report preview appears here."
+              note="The preview skips the AI insight. It is added when sent, only if the template turns it on."
+              actions={
+                report && (
+                  <Tooltip content={copied ? "Copied" : "Copy report text"} align="end">
+                    <button type="button" className="icon-button" aria-label="Copy report text" onClick={copy}>
+                      {copied ? <Check size={16} /> : <Copy size={16} />}
+                    </button>
+                  </Tooltip>
+                )
+              }
+            />
+          </div>
+        </section>
+
+        <section className="fit-col">
+          <SectionHead icon={CalendarClock} title="Schedule it" />
+          <form className="card panel compact" onSubmit={create}>
+            <div className="fields two">
               <div className="span-all">
                 <Field label="Name">
                   <input className="select" placeholder="Morning report" value={name} maxLength={80} onChange={(event) => setName(event.target.value)} />
@@ -228,46 +400,34 @@ export function Reports() {
               )}
             </div>
             <div className="panel-actions">
-              <button type="submit" className="btn primary grow" disabled={adding}>
+              <button type="submit" className="btn primary grow" disabled={adding || chosen.length === 0}>
                 {adding ? <LoaderCircle size={16} className="spin" /> : <Plus size={16} />} Add schedule
               </button>
             </div>
           </form>
-          {message && <p className={message.kind === "ok" ? "notice" : "notice error"}>{message.text}</p>}
-        </aside>
 
-        <aside className="split-preview sticky">
-          <SectionHead icon={FileText} title="Preview" text="The message as the selected channel will show it." />
-          <ChannelPreview
-            channel={channel}
-            rendered={report?.rendered ?? null}
-            email={report?.email ?? null}
-            loading={previewing}
-            emptyText="The report preview appears here."
-            note="The preview does not call the language model. The AI insight is added when the report is sent."
-            actions={
-              report && (
-                <Tooltip content={copied ? "Copied" : "Copy report text"} align="end">
-                  <button type="button" className="icon-button" aria-label="Copy report text" onClick={copy}>
-                    {copied ? <Check size={16} /> : <Copy size={16} />}
-                  </button>
-                </Tooltip>
-              )
-            }
+          <SectionHead
+            icon={Repeat}
+            title="Schedules"
+            text={list.length > 0 ? `${active} of ${list.length} active.` : undefined}
           />
-        </aside>
-
-        <div className="split-main">
-          <section className="section">
-            <SectionHead
-              icon={Repeat}
-              title="Schedules"
-              text={list.length > 0 ? `${active} of ${list.length} active.` : "Reports sent automatically at a set time."}
-            />
+          <div className="fit-scroll grow">
             {list.length > 0 ? (
-              <ul className="card-grid">
+              <ul className="card-grid compact">
                 {list.map((item) => {
                   const kind = TEMPLATES[item.template as Template];
+                  const linkedDestinations = item.destination_ids
+                    .map((id) => destinationList.find((entry) => entry.id === id))
+                    .filter((entry): entry is Destination => entry !== undefined);
+                  const deliveredBy =
+                    linkedDestinations.length === 0
+                      ? channelName(item.channel)
+                      : linkedDestinations.length === 1
+                        ? linkedDestinations[0].name
+                        : `${linkedDestinations.length} destinations`;
+                  const deliveredChannel = linkedDestinations.length === 1 ? linkedDestinations[0].channel : item.channel;
+                  const deliveredTip =
+                    linkedDestinations.length > 0 ? linkedDestinations.map((entry) => entry.name).join(", ") : deliveredBy;
                   return (
                     <li key={item.id} className={item.enabled ? "item" : "item off"}>
                       <div className="item-head">
@@ -310,10 +470,10 @@ export function Reports() {
                             <span className="truncate">{accountName(item.account_id)}</span>
                           </span>
                         </Tooltip>
-                        <Tooltip content={`Delivered via ${channelName(item.channel)}`} align="end">
+                        <Tooltip content={`Delivered to ${deliveredTip}`} align="end">
                           <span className="meta-chip" tabIndex={0}>
-                            <BrandIcon name={item.channel} size="sm" />
-                            {channelName(item.channel)}
+                            {linkedDestinations.length > 1 ? <Users size={14} /> : <BrandIcon name={deliveredChannel} size="sm" />}
+                            <span className="truncate">{deliveredBy}</span>
                           </span>
                         </Tooltip>
                       </div>
@@ -344,12 +504,12 @@ export function Reports() {
                 <EmptyState
                   icon={CalendarClock}
                   title="No schedules yet"
-                  text="Choose a template, account and channel, then add a schedule to send it automatically."
+                  text="Pick destinations, then add a schedule to send automatically."
                 />
               )
             )}
-          </section>
-        </div>
+          </div>
+        </section>
       </div>
     </div>
   );

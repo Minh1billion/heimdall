@@ -10,6 +10,20 @@ pub struct Db {
     inner: Arc<Mutex<Connection>>,
 }
 
+fn ensure_column(conn: &Connection, table: &str, column: &str, ddl: &str) -> Result<(), Failure> {
+    let present = {
+        let mut statement = conn.prepare(&format!("PRAGMA table_info({})", table))?;
+        let names = statement
+            .query_map([], |row| row.get::<_, String>(1))?
+            .collect::<Result<Vec<String>, _>>()?;
+        names.iter().any(|name| name == column)
+    };
+    if !present {
+        conn.execute_batch(&format!("ALTER TABLE {} ADD COLUMN {} {}", table, column, ddl))?;
+    }
+    Ok(())
+}
+
 impl Db {
     pub fn open(dir: &Path) -> Result<Db, Failure> {
         std::fs::create_dir_all(dir)?;
@@ -28,6 +42,8 @@ impl Db {
         if !has_connection_id {
             conn.execute_batch("ALTER TABLE ad_accounts ADD COLUMN connection_id INTEGER")?;
         }
+        ensure_column(&conn, "destinations", "template_id", "INTEGER")?;
+        ensure_column(&conn, "destinations", "account_ids", "TEXT")?;
         Ok(Db {
             inner: Arc::new(Mutex::new(conn)),
         })

@@ -186,6 +186,34 @@ CREATE TABLE IF NOT EXISTS app_setting (
   updated_at DATETIME NOT NULL,
   PRIMARY KEY ("key")
 );
+
+CREATE TABLE IF NOT EXISTS destinations (
+  id INTEGER NOT NULL,
+  name VARCHAR(80) NOT NULL,
+  channel VARCHAR(32) NOT NULL,
+  config TEXT NOT NULL,
+  enabled BOOLEAN NOT NULL,
+  created_at DATETIME NOT NULL,
+  last_sent_at DATETIME,
+  last_error VARCHAR(500),
+  PRIMARY KEY (id)
+);
+
+CREATE TABLE IF NOT EXISTS schedule_destinations (
+  schedule_id INTEGER NOT NULL,
+  destination_id INTEGER NOT NULL,
+  PRIMARY KEY (schedule_id, destination_id),
+  FOREIGN KEY(schedule_id) REFERENCES report_schedules (id) ON DELETE CASCADE,
+  FOREIGN KEY(destination_id) REFERENCES destinations (id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS report_templates (
+    id INTEGER NOT NULL,
+    name VARCHAR(80) NOT NULL,
+    config TEXT NOT NULL,
+    created_at DATETIME NOT NULL,
+    PRIMARY KEY (id)
+);
 "#;
 
 use chrono::{DateTime, Duration, NaiveDate, NaiveDateTime, Utc};
@@ -321,6 +349,37 @@ impl MetaConnectionRow {
             created_at: row.get("created_at")?,
             last_synced_at: row.get("last_synced_at")?,
             last_error: row.get("last_error")?,
+        })
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct DestinationRow {
+    pub id: i64,
+    pub name: String,
+    pub channel: String,
+    pub config: String,
+    pub enabled: i64,
+    pub created_at: String,
+    pub last_sent_at: Option<String>,
+    pub last_error: Option<String>,
+    pub template_id: Option<i64>,
+    pub account_ids: Option<String>,
+}
+
+impl DestinationRow {
+    pub fn from_row(row: &Row) -> rusqlite::Result<Self> {
+        Ok(DestinationRow {
+            id: row.get("id")?,
+            name: row.get("name")?,
+            channel: row.get("channel")?,
+            config: row.get("config")?,
+            enabled: row.get("enabled")?,
+            created_at: row.get("created_at")?,
+            last_sent_at: row.get("last_sent_at")?,
+            last_error: row.get("last_error")?,
+            template_id: row.get("template_id")?,
+            account_ids: row.get("account_ids")?,
         })
     }
 }

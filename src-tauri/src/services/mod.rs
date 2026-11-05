@@ -10,4 +10,6 @@ pub mod render;
 pub mod reports;
 pub mod scheduler;
 pub mod sync;
+pub mod destinations;
+pub mod templates;
 pub mod settings_groups;

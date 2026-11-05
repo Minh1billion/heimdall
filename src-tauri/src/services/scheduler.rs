@@ -1,5 +1,6 @@
 use crate::container::Container;
 use crate::models::{clip, parse_dt, utcnow, ReportScheduleRow};
+use crate::services::destinations::{broadcast_reports, linked_ids, Overrides};
 use crate::services::reports::build_report;
 use chrono::{DateTime, Datelike, Utc};
 use rusqlite::{params, OptionalExtension};
@@ -68,18 +69,41 @@ pub async fn run_schedule(container: &Container, schedule_id: i64) {
         Some(found) => found,
         None => return,
     };
-    let mut failure: Option<String> = None;
-    match container.notifier(&schedule.channel) {
-        None => failure = Some(format!("{} is not configured", schedule.channel)),
-        Some(notifier) => match build_report(container, &schedule.template, schedule.account_id.as_deref(), false).await {
-            Ok(report) => {
-                if let Err(error) = notifier.send(&report.title, &report.text).await {
-                    failure = Some(error.0);
+    let linked = linked_ids(&container.db, schedule_id).unwrap_or_default();
+    let mut failures: Vec<String> = Vec::new();
+    if linked.is_empty() {
+        match container.notifier(&schedule.channel) {
+            None => failures.push(format!("{} is not configured", schedule.channel)),
+            Some(notifier) => match build_report(container, &schedule.template, schedule.account_id.as_deref(), false).await {
+                Ok(report) => {
+                    if let Err(error) = notifier.send(&report.title, &report.text).await {
+                        failures.push(error.0);
+                    }
+                }
+                Err(error) => failures.push(error.to_string()),
+            },
+        }
+    } else {
+        let outcomes = broadcast_reports(
+            container,
+            &linked,
+            &schedule.template,
+            schedule.account_id.as_deref(),
+            &Overrides {
+                no_insight: true,
+                ..Overrides::default()
+            },
+        )
+        .await;
+        for outcome in outcomes {
+            if let Some(message) = outcome.error {
+                if !outcome.skipped {
+                    failures.push(format!("{}: {}", outcome.name, message));
                 }
             }
-            Err(error) => failure = Some(error.to_string()),
-        },
+        }
     }
+    let failure: Option<String> = if failures.is_empty() { None } else { Some(failures.join("; ")) };
     if let Some(message) = &failure {
         eprintln!("Scheduled report {} failed {}", schedule_id, message);
     }

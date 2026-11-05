@@ -6,8 +6,10 @@ import {
   House,
   MessageCircle,
   Rows3,
+  LayoutTemplate,
   Settings,
   ShieldCheck,
+  Users,
   type LucideIcon,
 } from "lucide-react";
 
@@ -28,6 +30,8 @@ export const NAV: NavItem[] = [
   { to: "/chat", label: "Chat", icon: MessageCircle, ready: true, group: "Workspace", summary: "Ask questions about your ad data." },
   { to: "/ad-accounts", label: "Ad accounts", icon: Building2, ready: true, group: "Ads", summary: "Facebook ad accounts connected through your Meta token." },
   { to: "/insights", label: "Insights", icon: ChartNoAxesColumn, ready: true, group: "Ads", summary: "Spend, results and trends by campaign." },
+  { to: "/destinations", label: "Destinations", icon: Users, ready: true, group: "Ads", summary: "Who receives your reports: partner chats, groups and inboxes." },
+  { to: "/templates", label: "Templates", icon: LayoutTemplate, ready: true, group: "Ads", summary: "Choose which numbers, language and wording each destination receives." },
   { to: "/reports", label: "Reports", icon: FileText, ready: true, group: "Ads", summary: "Build reports, send them now or on a schedule." },
   { to: "/alerts", label: "Alerts", icon: Bell, ready: true, group: "Ads", summary: "Rules are checked after every Meta sync and fire at most once per cooldown." },
   { to: "/approvals", label: "Approvals", icon: ShieldCheck, ready: true, group: "Ads", summary: "The agent only proposes campaign changes. Nothing reaches Meta until you approve it." },

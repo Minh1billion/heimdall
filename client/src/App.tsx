@@ -8,12 +8,14 @@ import { Alerts } from "./pages/Alerts";
 import { Approvals } from "./pages/Approvals";
 import { Chat } from "./pages/Chat";
 import { ComingSoon } from "./pages/ComingSoon";
+import { Destinations } from "./pages/Destinations";
 import { Home } from "./pages/Home";
 import { Insights } from "./pages/Insights";
 import { Logs } from "./pages/Logs";
 import { NotFound } from "./pages/NotFound";
 import { Reports } from "./pages/Reports";
 import { Settings } from "./pages/Settings";
+import { Templates } from "./pages/Templates";
 
 export default function App() {
   const [collapsed, setCollapsed] = useState(false);
@@ -26,6 +28,8 @@ export default function App() {
         <main className="main">
           <Routes>
             <Route path="/" element={<Home />} />
+            <Route path="/destinations" element={<Destinations />} />
+            <Route path="/templates" element={<Templates />} />
             <Route path="/reports" element={<Reports />} />
             <Route path="/alerts" element={<Alerts />} />
             <Route path="/chat" element={<Chat />} />

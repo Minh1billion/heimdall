@@ -262,7 +262,7 @@ export function Alerts() {
               </p>
             </div>
 
-            <div className="fields">
+            <div className="fields two">
               <div className="span-all">
                 <Field label="Name" hint="Shown in the notification. Leave empty to use the metric name.">
                   <input
